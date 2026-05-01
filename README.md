@@ -139,7 +139,7 @@ curl -s http://127.0.0.1:8080/v1/models | python -m json.tool
 ```bash
 # Clone the repo
 git clone <repo-url>
-cd antfarm_pi_build
+cd ant-farm
 
 # Create and activate a virtual environment
 python -m venv .venv

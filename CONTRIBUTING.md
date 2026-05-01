@@ -7,8 +7,8 @@ Thank you for your interest in Ant Farm! This document covers how to get started
 1. **Fork** this repository.
 2. **Clone** your fork:
    ```bash
-   git clone https://github.com/<your-username>/antfarm_pi_build.git
-   cd antfarm_pi_build
+   git clone https://github.com/shaunakseth5/ant-farm.git
+   cd ant-farm
    ```
 3. **Install** development dependencies:
    ```bash
