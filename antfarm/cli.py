@@ -32,6 +32,15 @@ def _repo() -> Path:
     return repo
 
 
+def _matched_repo_files(repo: Path, patterns: List[str]) -> List[str]:
+    matched: list[str] = []
+    for pattern in patterns:
+        for path in repo.glob(pattern):
+            if path.is_file() and ".antfarm" not in path.parts and ".git" not in path.parts:
+                matched.append(str(path.relative_to(repo)))
+    return sorted(set(matched))
+
+
 def _print_json(data: object) -> None:
     console.print(Syntax(json.dumps(data, indent=2, sort_keys=True), "json", word_wrap=True))
 
@@ -181,12 +190,26 @@ def mission_cmd(
         console.print("[red]No ant roles provided.[/red]")
         raise typer.Exit(1)
 
+    matched_files = _matched_repo_files(repo, files)
+    missing_globs = [pattern for pattern in files if not _matched_repo_files(repo, [pattern])]
+    if files and (not matched_files or missing_globs):
+        console.print(Panel(
+            "[bold red]One or more --files globs matched no files.[/bold red]\n"
+            f"Repo: {repo}\n"
+            f"Globs: {', '.join(files)}\n"
+            f"Missing globs: {', '.join(missing_globs) if missing_globs else '(all)'}\n\n"
+            "Fix the globs or cd to the correct repository root before running mission.",
+            title="Ant Farm preflight failed",
+        ))
+        raise typer.Exit(1)
+
     console.print(Panel(
         f"[bold yellow]🐜 Ant Farm Mission[/bold yellow]\n"
         f"Objective: [bold]{objective_id}[/bold]\n"
         f"Target: {target}\n"
         f"Ants: {', '.join(roles)}\n"
-        f"Files: {', '.join(files) if files else '(none)'}",
+        f"Files: {', '.join(files) if files else '(none)'}\n"
+        f"Matched files: {len(matched_files)}",
         title="colony launch",
     ))
 
@@ -238,6 +261,17 @@ def mission_cmd(
         if patch_task_id is None:
             console.print("[red]--apply-branch requires --patch-target in this mission command.[/red]")
             raise typer.Exit(1)
+        with db.connect(repo) as conn:
+            patch_candidate = db.patch_for_task(conn, patch_task_id)
+        if patch_candidate is None:
+            console.print(Panel(
+                "[bold red]PatchAnt produced no validated patch candidate; stopping before apply.[/bold red]\n"
+                f"Patch task: {patch_task_id}\n"
+                f"Check the PatchAnt report with: antfarm task {patch_task_id}",
+                title="Ant Farm",
+            ))
+            raise typer.Exit(1)
+
         with console.status("[bold green]🐜📦 moving patch into isolated worktree...[/bold green]", spinner="arc"):
             applied = apply_task_patch(repo, patch_task_id, apply_branch)
         console.print(f"[green]Patch applied in isolated worktree[/green]: {applied['worktree']}")
@@ -334,7 +368,11 @@ def apply_cmd(
 ) -> None:
     """Apply a patch candidate in .antfarm/worktrees only."""
     repo = _repo()
-    result = apply_task_patch(repo, task_id, branch)
+    try:
+        result = apply_task_patch(repo, task_id, branch)
+    except RuntimeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
     console.print(f"[green]Patch applied in isolated worktree[/green]: {result['worktree']}")
     console.print("Main checkout was not modified.")
 
