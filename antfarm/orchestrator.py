@@ -100,6 +100,34 @@ def _gate_patch_diff(repo: Path, report: Dict[str, Any]) -> None:
         report.setdefault("risks", []).append(f"Patch rejected before storage: git apply --check failed: {err}")
 
 
+
+def _normalize_queen_payload(parsed: Any) -> Dict[str, Any]:
+    """Accept imperfect Queen JSON and coerce it into QueenDecision shape."""
+    if isinstance(parsed, dict):
+        return parsed
+
+    if isinstance(parsed, list):
+        return {
+            "summary": "Queen returned a top-level task list instead of a decision object; Ant Farm normalized it.",
+            "decision": "Review the normalized next_tasks and continue with verifier-backed patch flow.",
+            "next_tasks": parsed,
+            "verifier_commands": [],
+            "risks": ["Queen output was a JSON list, not a QueenDecision object."],
+            "ready_for_patch_review": False,
+            "confidence": 0.5,
+        }
+
+    return {
+        "summary": "Queen returned an unsupported JSON shape; Ant Farm normalized it.",
+        "decision": "Run another scoped worker wave or inspect the raw Queen response.",
+        "next_tasks": [],
+        "verifier_commands": [],
+        "risks": [f"Unsupported Queen JSON type: {type(parsed).__name__}"],
+        "ready_for_patch_review": False,
+        "confidence": 0.0,
+    }
+
+
 def run_ant(repo: Path, objective_id: int, role: str, target: str, files: Iterable[str]) -> Dict[str, Any]:
     if role not in WORKER_ROLES:
         raise ValueError(f"Unknown worker role {role!r}. Expected one of: {', '.join(sorted(WORKER_ROLES))}")
@@ -177,7 +205,7 @@ def run_queen(repo: Path, objective_id: int) -> Dict[str, Any]:
     try:
         messages = queen_messages(objective["title"], reports_json)
         parsed, raw_text, _raw_api = LLMClient(cfg).chat_json(messages, model=cfg.model_for_role("queen"))
-        decision = _validate_model(QueenDecision, parsed)
+        decision = _validate_model(QueenDecision, _normalize_queen_payload(parsed))
         error = None
     except Exception as exc:
         raw_text = ""

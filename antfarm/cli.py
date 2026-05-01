@@ -155,6 +155,100 @@ def verify_worktree_cmd(
         console.print(Panel(result["stderr"], title="stderr"))
 
 
+@app.command("mission")
+def mission_cmd(
+    objective_id: int = typer.Argument(..., help="Objective id to run the animated Ant Farm mission against."),
+    target: str = typer.Option(..., "--target", "-t", help="Narrow target for the worker wave."),
+    files: List[str] = typer.Option([], "--files", "-f", help="Repo-relative file glob. Repeat for multiple globs."),
+    ants: str = typer.Option("debug,trace,risk", "--ants", help="Comma-separated worker roles for the first wave."),
+    max_workers: int = typer.Option(3, "--max-workers", help="Maximum parallel ants for the worker wave."),
+    verify: Optional[str] = typer.Option(None, "--verify", help="Optional verifier command to run after the worker wave."),
+    patch_target: Optional[str] = typer.Option(None, "--patch-target", help="Optional PatchAnt target. If set, runs PatchAnt after Queen."),
+    patch_files: List[str] = typer.Option([], "--patch-files", help="Optional patch file globs. Defaults to --files."),
+    apply_branch: Optional[str] = typer.Option(None, "--apply-branch", help="Optional branch name for isolated worktree patch application."),
+    verify_worktree: Optional[str] = typer.Option(None, "--verify-worktree", help="Optional verifier command to run inside the applied worktree."),
+) -> None:
+    """Run an animated Ant Farm mission: wave -> verify -> Queen -> optional patch -> optional worktree verify."""
+    repo = _repo()
+    roles = [role.strip() for role in ants.split(",") if role.strip()]
+    if not roles:
+        console.print("[red]No ant roles provided.[/red]")
+        raise typer.Exit(1)
+
+    console.print(Panel(
+        f"[bold yellow]🐜 Ant Farm Mission[/bold yellow]\n"
+        f"Objective: [bold]{objective_id}[/bold]\n"
+        f"Target: {target}\n"
+        f"Ants: {', '.join(roles)}\n"
+        f"Files: {', '.join(files) if files else '(none)'}",
+        title="colony launch",
+    ))
+
+    with console.status("[bold yellow]🐜🐜🐜 worker ants crawling through the codebase...[/bold yellow]", spinner="dots"):
+        wave = run_wave(repo, objective_id, roles, target, files, max_workers)
+
+    table = Table(title="🐜 Worker wave results")
+    table.add_column("Task")
+    table.add_column("Role")
+    table.add_column("Status")
+    table.add_column("Summary")
+    for result in wave:
+        report = result.get("report") or {}
+        table.add_row(str(result["task_id"]), report.get("role", ""), result["status"], report.get("summary", ""))
+    console.print(table)
+
+    if verify:
+        with console.status("[bold cyan]🧪 verifier ants running deterministic checks...[/bold cyan]", spinner="bouncingBar"):
+            verify_result = run_verifier(repo, objective_id, verify)
+        color = "green" if verify_result["exit_code"] == 0 else "red"
+        console.print(f"[{color}]Verifier {verify_result['id']} exit={verify_result['exit_code']} timed_out={verify_result['timed_out']} duration={verify_result['duration_seconds']:.2f}s[/{color}]")
+        if verify_result["stdout"]:
+            console.print(Panel(verify_result["stdout"], title="verifier stdout"))
+        if verify_result["stderr"]:
+            console.print(Panel(verify_result["stderr"], title="verifier stderr"))
+
+    with console.status("[bold magenta]👑 QueenAnt reviewing the colony reports...[/bold magenta]", spinner="moon"):
+        queen_result = run_queen(repo, objective_id)
+    console.print(f"[green]Queen task {queen_result['task_id']}[/green] status={queen_result['status']}")
+    _print_json(queen_result["decision"])
+
+    patch_task_id = None
+    if patch_target:
+        pf = patch_files or files
+        with console.status("[bold yellow]🛠️ PatchAnt forging a gated diff...[/bold yellow]", spinner="line"):
+            patch_result = run_ant(repo, objective_id, "patch", patch_target, pf)
+        patch_task_id = patch_result["task_id"]
+        console.print(f"[green]PatchAnt task {patch_task_id}[/green] status={patch_result['status']}")
+        _print_json(patch_result["report"])
+
+    applied = None
+    if apply_branch:
+        if patch_task_id is None:
+            console.print("[red]--apply-branch requires --patch-target in this mission command.[/red]")
+            raise typer.Exit(1)
+        with console.status("[bold green]🐜📦 moving patch into isolated worktree...[/bold green]", spinner="arc"):
+            applied = apply_task_patch(repo, patch_task_id, apply_branch)
+        console.print(f"[green]Patch applied in isolated worktree[/green]: {applied['worktree']}")
+        console.print("Main checkout was not modified.")
+
+    if verify_worktree:
+        if patch_task_id is None or applied is None:
+            console.print("[red]--verify-worktree requires --patch-target and --apply-branch.[/red]")
+            raise typer.Exit(1)
+        worktree = Path(applied["worktree"]).resolve()
+        with console.status("[bold cyan]🐜✅ verifier ants testing the worktree...[/bold cyan]", spinner="aesthetic"):
+            wt_result = run_verifier_in_dir(repo, objective_id, verify_worktree, worktree)
+        color = "green" if wt_result["exit_code"] == 0 else "red"
+        console.print(f"[{color}]Worktree verifier {wt_result['id']} exit={wt_result['exit_code']} timed_out={wt_result['timed_out']} duration={wt_result['duration_seconds']:.2f}s[/{color}]")
+        console.print(f"Worktree: {worktree}")
+        if wt_result["stdout"]:
+            console.print(Panel(wt_result["stdout"], title="worktree stdout"))
+        if wt_result["stderr"]:
+            console.print(Panel(wt_result["stderr"], title="worktree stderr"))
+
+    console.print(Panel("[bold green]🐜 colony mission complete[/bold green]", title="Ant Farm"))
+
+
 @app.command("status")
 def status_cmd() -> None:
     """Show repo-local Ant Farm status."""
