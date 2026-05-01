@@ -1,0 +1,53 @@
+version = 1
+
+[*]
+jinja = true
+reasoning-format = deepseek
+flash-attn = on
+n-gpu-layers = 99
+
+[worker-qwen3.5-9b]
+model = /home/shaunakseth/models/qwen3.5-9b-unsloth/Qwen3.5-9B-UD-Q5_K_XL.gguf
+ctx-size = 32768
+parallel = 4
+temp = 0.2
+top-p = 0.9
+top-k = 20
+min-p = 0.0
+
+[worker-qwen3.5-9b-q6]
+model = /home/shaunakseth/models/qwen3.5-9b-unsloth-q6/Qwen3.5-9B-Q6_K.gguf
+ctx-size = 32768
+parallel = 3
+temp = 0.2
+top-p = 0.9
+top-k = 20
+min-p = 0.0
+
+[fast-coder-qwen2.5-7b]
+model = /home/shaunakseth/models/qwen2.5-coder-7b-official/qwen2.5-coder-7b-instruct-q5_k_m.gguf
+ctx-size = 32768
+parallel = 4
+temp = 0.15
+top-p = 0.9
+top-k = 20
+min-p = 0.0
+
+[patch-qwen2.5-coder-14b]
+model = /home/shaunakseth/models/qwen2.5-coder-14b-bartowski/Qwen2.5-Coder-14B-Instruct-Q5_K_M.gguf
+ctx-size = 32768
+parallel = 2
+temp = 0.15
+top-p = 0.9
+top-k = 20
+min-p = 0.0
+
+[queen-qwen3.6-35b-a3b]
+model = /home/shaunakseth/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+ctx-size = 65536
+parallel = 1
+temp = 0.7
+top-p = 0.95
+top-k = 20
+min-p = 0.0
+presence-penalty = 1.5
