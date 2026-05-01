@@ -58,6 +58,23 @@ def resolve_repo(repo: Optional[str | Path] = None) -> Path:
     return Path(raw).expanduser().resolve()
 
 
+def is_inside_antfarm_worktree(path: Path) -> bool:
+    """Return True if path is inside an Ant Farm managed git worktree."""
+    parts = path.expanduser().resolve().parts
+    for i in range(len(parts) - 1):
+        if parts[i] == STATE_DIR_NAME and parts[i + 1] == "worktrees":
+            return True
+    return False
+
+
+def assert_not_inside_antfarm_worktree(path: Path) -> None:
+    if is_inside_antfarm_worktree(path):
+        raise RuntimeError(
+            "Refusing to run Ant Farm from inside .antfarm/worktrees. "
+            "cd to the original repository root, then rerun the command."
+        )
+
+
 def ensure_repo_initialized(repo: Path) -> None:
     if not state_dir(repo).is_dir() or not config_path(repo).is_file():
         raise RuntimeError(f"Ant Farm is not initialized in {repo}. Run: antfarm init --repo {repo}")

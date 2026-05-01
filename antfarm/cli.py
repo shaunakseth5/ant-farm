@@ -12,6 +12,7 @@ from rich.syntax import Syntax
 
 from . import __version__, db
 from .config import AntFarmConfig, ensure_repo_initialized, load_config, resolve_repo, save_config
+from .config import assert_not_inside_antfarm_worktree
 from .orchestrator import WORKER_ROLES, run_ant, run_queen, run_wave
 from .sandbox import apply_task_patch
 from .verifier import run_verifier, run_verifier_in_dir
@@ -22,7 +23,12 @@ console = Console()
 
 def _repo() -> Path:
     repo = resolve_repo()
-    ensure_repo_initialized(repo)
+    try:
+        assert_not_inside_antfarm_worktree(repo)
+        ensure_repo_initialized(repo)
+    except RuntimeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
     return repo
 
 
@@ -211,6 +217,9 @@ def mission_cmd(
         queen_result = run_queen(repo, objective_id)
     console.print(f"[green]Queen task {queen_result['task_id']}[/green] status={queen_result['status']}")
     _print_json(queen_result["decision"])
+    if queen_result["status"] != "done":
+        console.print(Panel("[bold red]Queen failed; stopping mission before patch phase.[/bold red]", title="Ant Farm"))
+        raise typer.Exit(1)
 
     patch_task_id = None
     if patch_target:
@@ -220,6 +229,9 @@ def mission_cmd(
         patch_task_id = patch_result["task_id"]
         console.print(f"[green]PatchAnt task {patch_task_id}[/green] status={patch_result['status']}")
         _print_json(patch_result["report"])
+        if patch_result["status"] != "done":
+            console.print(Panel("[bold red]PatchAnt failed; stopping mission before apply.[/bold red]", title="Ant Farm"))
+            raise typer.Exit(1)
 
     applied = None
     if apply_branch:
@@ -245,6 +257,9 @@ def mission_cmd(
             console.print(Panel(wt_result["stdout"], title="worktree stdout"))
         if wt_result["stderr"]:
             console.print(Panel(wt_result["stderr"], title="worktree stderr"))
+        if wt_result["exit_code"] != 0 or wt_result["timed_out"]:
+            console.print(Panel("[bold red]🐜 Worktree verifier failed; colony mission failed.[/bold red]", title="Ant Farm"))
+            raise typer.Exit(1)
 
     console.print(Panel("[bold green]🐜 colony mission complete[/bold green]", title="Ant Farm"))
 
