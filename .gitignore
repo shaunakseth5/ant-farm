@@ -1,8 +1,34 @@
+# Python
 .venv/
 __pycache__/
-*.pyc
-.pytest_cache/
-_smoke_repo/
-*.bak-*
-.antfarm/
+*.py[cod]
+*$py.class
+*.so
 *.egg-info/
+.pytest_cache/
+
+# Ant Farm state
+.antfarm/
+
+# Smoke repo (internal test fixture)
+_smoke_repo/
+
+# Backup files from development
+*.bak-*
+
+# OS / editor
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Logs and sessions
+.pi-sessions/
+logs/
+*.log
+
+# Model artifacts (GGUF, safetensors) — keep these out of the repo
+*.gguf
+*.safetensors
+**/models/
