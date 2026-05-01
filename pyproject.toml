@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "antfarm"
+version = "0.1.0"
+description = "Local clean-room multi-agent coding system backed by llama.cpp"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Ant Farm" }]
+dependencies = [
+  "httpx>=0.25",
+  "pydantic>=1.10",
+  "typer>=0.9",
+  "rich>=13",
+]
+
+[project.scripts]
+antfarm = "antfarm.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["antfarm*"]

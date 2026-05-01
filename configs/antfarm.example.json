@@ -1,0 +1,8 @@
+{
+  "llm_base_url": "http://127.0.0.1:8080/v1",
+  "model": "qwen3.6-35b-a3b",
+  "llm_timeout_seconds": 120,
+  "verifier_timeout_seconds": 300,
+  "max_context_bytes_per_file": 20000,
+  "max_context_bytes_total": 120000
+}

@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+_smoke_repo/
+*.bak-*
+.antfarm/
+*.egg-info/
