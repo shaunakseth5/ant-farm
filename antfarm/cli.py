@@ -270,7 +270,16 @@ def status_cmd() -> None:
     repo = _repo()
     cfg = load_config(repo)
     console.print(f"Repo: {repo}")
-    console.print(f"LLM: {cfg.model} at {cfg.llm_base_url}")
+    console.print(f"LLM endpoint: {cfg.llm_base_url}")
+    console.print(f"Fallback model: {cfg.model}")
+
+    role_table = Table(title="Role model routing")
+    role_table.add_column("Role")
+    role_table.add_column("Model")
+    for role, model in sorted(cfg.model_by_role.items()):
+        role_table.add_row(role, model)
+    console.print(role_table)
+
     with db.connect(repo) as conn:
         objectives = db.list_objectives(conn)
         tasks = db.list_tasks(conn)
