@@ -16,6 +16,11 @@ dependencies = [
   "rich>=13",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+]
+
 [project.scripts]
 antfarm = "antfarm.cli:main"
 

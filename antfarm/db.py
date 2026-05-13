@@ -230,6 +230,27 @@ def patch_for_task(conn: sqlite3.Connection, task_id: int) -> Optional[sqlite3.R
     return conn.execute("SELECT * FROM patch_candidates WHERE task_id = ? ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
 
 
+def list_memory_candidates(conn: sqlite3.Connection, objective_id: int | None = None, status: str | None = None, limit: int = 50) -> List[sqlite3.Row]:
+    clauses = []
+    params: list[Any] = []
+    if objective_id is not None:
+        clauses.append("objective_id = ?")
+        params.append(objective_id)
+    if status is not None:
+        clauses.append("status = ?")
+        params.append(status)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    return list(conn.execute(f"SELECT * FROM memory_candidates {where} ORDER BY id DESC LIMIT ?", params))
+
+
+def update_memory_status(conn: sqlite3.Connection, memory_id: int, status: str) -> None:
+    cur = conn.execute("UPDATE memory_candidates SET status = ? WHERE id = ?", (status, memory_id))
+    if cur.rowcount == 0:
+        raise KeyError(f"Memory candidate {memory_id} not found")
+    conn.commit()
+
+
 def mark_patch_applied(conn: sqlite3.Connection, patch_id: int, worktree_path: str) -> None:
     conn.execute(
         "UPDATE patch_candidates SET status = 'applied_to_worktree', worktree_path = ?, updated_at = ? WHERE id = ?",

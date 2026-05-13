@@ -81,8 +81,8 @@ class LLMClient:
         payload = {
             "model": model or self.config.model,
             "messages": routed_messages,
-            "temperature": 0.2,
-            "max_tokens": 4096,
+            "temperature": self.config.llm_temperature,
+            "max_tokens": self.config.llm_max_tokens,
             "stream": False,
         }
         url = f"{self.base_url}/chat/completions"

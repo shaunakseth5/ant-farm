@@ -21,9 +21,13 @@ class AntFarmConfig(BaseModel):
         "queen": "queen-qwen3.6-35b-a3b",
     })
     llm_timeout_seconds: float = 120.0
+    llm_temperature: float = 0.2
+    llm_max_tokens: int = 4096
     verifier_timeout_seconds: float = 300.0
     max_context_bytes_per_file: int = 20_000
     max_context_bytes_total: int = 120_000
+    max_context_files: int = 60
+    queen_max_report_bytes: int = 24_000
     created_by: str = "antfarm"
     extra: Dict[str, Any] = Field(default_factory=dict)
 
@@ -48,14 +52,32 @@ def db_path(repo: Path) -> Path:
     return state_dir(repo) / DB_FILE
 
 
-def resolve_repo(repo: Optional[str | Path] = None) -> Path:
-    """Resolve the repo root without walking parent directories.
+def _nearest_initialized_repo(start: Path) -> Path | None:
+    """Return the closest parent containing Ant Farm state, if any."""
+    current = start.expanduser().resolve()
+    candidates = [current, *current.parents]
+    for candidate in candidates:
+        if config_path(candidate).is_file():
+            return candidate
+    return None
 
-    Ant Farm is intentionally repo-local. Commands run against ANTFARM_REPO if set,
-    otherwise the current working directory, unless an explicit repo is provided.
+
+def resolve_repo(repo: Optional[str | Path] = None) -> Path:
+    """Resolve the repository Ant Farm should operate on.
+
+    Explicit ``repo`` and ``ANTFARM_REPO`` are honored exactly. Otherwise, Ant Farm
+    walks upward from the current directory and selects the nearest parent that has
+    been initialized with ``.antfarm/config.json``. This keeps state repo-local while
+    allowing normal CLI use from subdirectories. If no initialized parent exists,
+    the current working directory is returned so callers can produce the standard
+    "run antfarm init" error for that location.
     """
-    raw = repo or os.environ.get("ANTFARM_REPO") or Path.cwd()
-    return Path(raw).expanduser().resolve()
+    if repo is not None:
+        return Path(repo).expanduser().resolve()
+    env_repo = os.environ.get("ANTFARM_REPO")
+    if env_repo:
+        return Path(env_repo).expanduser().resolve()
+    return _nearest_initialized_repo(Path.cwd()) or Path.cwd().resolve()
 
 
 def is_inside_antfarm_worktree(path: Path) -> bool:
@@ -90,6 +112,12 @@ def load_config(repo: Path) -> AntFarmConfig:
 def save_config(repo: Path, config: AntFarmConfig) -> None:
     sd = state_dir(repo)
     sd.mkdir(parents=True, exist_ok=True)
+    # Keep blackboard databases, worktrees, and transient logs out of the target repo.
+    # The ignore file intentionally ignores itself too, avoiding a noisy untracked
+    # .antfarm/ directory after initialization.
+    ignore_path = sd / ".gitignore"
+    if not ignore_path.exists():
+        ignore_path.write_text("*\n", encoding="utf-8")
     path = config_path(repo)
     if hasattr(config, "model_dump"):
         text = json.dumps(config.model_dump(), indent=2)

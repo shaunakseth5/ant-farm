@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
+import httpx
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -11,13 +13,18 @@ from rich.table import Table
 from rich.syntax import Syntax
 
 from . import __version__, db
-from .config import AntFarmConfig, ensure_repo_initialized, load_config, resolve_repo, save_config
-from .config import assert_not_inside_antfarm_worktree
+from .config import AntFarmConfig, config_path, db_path, ensure_repo_initialized, load_config, resolve_repo, save_config
+from .config import assert_not_inside_antfarm_worktree, is_inside_antfarm_worktree
 from .orchestrator import WORKER_ROLES, run_ant, run_queen, run_wave
+from .repo import build_context_plan, render_context
 from .sandbox import apply_task_patch
 from .verifier import run_verifier, run_verifier_in_dir
 
 app = typer.Typer(help="Ant Farm: local repo-scoped multi-agent coding system")
+config_app = typer.Typer(help="Inspect and edit repo-local Ant Farm configuration")
+memory_app = typer.Typer(help="Review and promote worker memory candidates")
+app.add_typer(config_app, name="config")
+app.add_typer(memory_app, name="memory")
 console = Console()
 
 
@@ -43,6 +50,27 @@ def _matched_repo_files(repo: Path, patterns: List[str]) -> List[str]:
 
 def _print_json(data: object) -> None:
     console.print(Syntax(json.dumps(data, indent=2, sort_keys=True), "json", word_wrap=True))
+
+
+def _format_bytes(value: int) -> str:
+    if value < 1024:
+        return f"{value} B"
+    if value < 1024 * 1024:
+        return f"{value / 1024:.1f} KiB"
+    return f"{value / (1024 * 1024):.1f} MiB"
+
+
+def _config_to_dict(cfg: AntFarmConfig) -> dict[str, Any]:
+    if hasattr(cfg, "model_dump"):
+        return cfg.model_dump()
+    return json.loads(cfg.json())
+
+
+def _parse_config_value(value: str) -> Any:
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
 
 
 @app.callback()
@@ -73,6 +101,202 @@ def objective_cmd(title: str = typer.Argument(..., help="Objective title.")) -> 
         db.init_db(conn)
         objective_id = db.create_objective(conn, title)
     console.print(f"[green]Objective {objective_id}[/green]: {title}")
+
+
+@config_app.command("show")
+def config_show_cmd() -> None:
+    """Print the repo-local configuration as JSON."""
+    repo = _repo()
+    _print_json(_config_to_dict(load_config(repo)))
+
+
+@config_app.command("set")
+def config_set_cmd(
+    key: str = typer.Argument(..., help="Top-level key, model_by_role.<role>, or extra.<key>."),
+    value: str = typer.Argument(..., help="JSON value or raw string."),
+) -> None:
+    """Set one repo-local configuration value with validation."""
+    repo = _repo()
+    cfg = load_config(repo)
+    data = _config_to_dict(cfg)
+    parsed = _parse_config_value(value)
+
+    if key.startswith("model_by_role."):
+        role = key.split(".", 1)[1]
+        if not role:
+            console.print("[red]Role name is required after model_by_role.[/red]")
+            raise typer.Exit(1)
+        data.setdefault("model_by_role", {})[role] = str(parsed)
+    elif key.startswith("extra."):
+        extra_key = key.split(".", 1)[1]
+        if not extra_key:
+            console.print("[red]Key name is required after extra.[/red]")
+            raise typer.Exit(1)
+        data.setdefault("extra", {})[extra_key] = parsed
+    elif key in data and not isinstance(data.get(key), dict):
+        data[key] = parsed
+    else:
+        console.print(f"[red]Unknown or unsupported config key: {key}[/red]")
+        raise typer.Exit(1)
+
+    try:
+        updated = AntFarmConfig(**data)
+    except Exception as exc:
+        console.print(f"[red]Invalid config value for {key}: {exc}[/red]")
+        raise typer.Exit(1)
+    save_config(repo, updated)
+    console.print(f"[green]Updated[/green] {key} = {json.dumps(parsed)}")
+
+
+@memory_app.command("list")
+def memory_list_cmd(
+    objective_id: Optional[int] = typer.Option(None, "--objective-id", help="Filter by objective id."),
+    status: Optional[str] = typer.Option(None, "--status", help="Filter by status: proposed, accepted, rejected."),
+    limit: int = typer.Option(50, "--limit", min=1, max=500, help="Maximum rows to show."),
+) -> None:
+    """List worker-proposed memory candidates without automatically trusting them."""
+    repo = _repo()
+    with db.connect(repo) as conn:
+        rows = db.list_memory_candidates(conn, objective_id=objective_id, status=status, limit=limit)
+    table = Table(title="Memory candidates")
+    table.add_column("ID")
+    table.add_column("Obj")
+    table.add_column("Task")
+    table.add_column("Status")
+    table.add_column("Text")
+    for row in rows:
+        table.add_row(str(row["id"]), str(row["objective_id"]), str(row["task_id"]), row["status"], row["text"])
+    console.print(table)
+
+
+@memory_app.command("accept")
+def memory_accept_cmd(memory_id: int = typer.Argument(..., help="Memory candidate id.")) -> None:
+    """Mark a memory candidate as accepted for future reuse."""
+    _set_memory_status(memory_id, "accepted")
+
+
+@memory_app.command("reject")
+def memory_reject_cmd(memory_id: int = typer.Argument(..., help="Memory candidate id.")) -> None:
+    """Reject a memory candidate so it is not reused."""
+    _set_memory_status(memory_id, "rejected")
+
+
+def _set_memory_status(memory_id: int, status: str) -> None:
+    repo = _repo()
+    try:
+        with db.connect(repo) as conn:
+            db.update_memory_status(conn, memory_id, status)
+    except KeyError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Memory {memory_id} marked {status}[/green]")
+
+
+@app.command("doctor")
+def doctor_cmd(
+    repo: Optional[Path] = typer.Option(None, "--repo", help="Repository to inspect. Defaults to nearest initialized parent."),
+    check_llm: bool = typer.Option(True, "--llm/--no-llm", help="Check the configured OpenAI-compatible LLM endpoint."),
+) -> None:
+    """Check local Ant Farm setup, git state, database, and LLM connectivity."""
+    target = resolve_repo(repo)
+    table = Table(title=f"Ant Farm doctor: {target}")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Details")
+    failed = False
+
+    def add_check(name: str, ok: bool, details: str) -> None:
+        nonlocal failed
+        if not ok:
+            failed = True
+        table.add_row(name, "[green]ok[/green]" if ok else "[red]fail[/red]", details)
+
+    add_check("repo directory", target.is_dir(), str(target))
+    add_check("not managed worktree", not is_inside_antfarm_worktree(target), "path is outside .antfarm/worktrees")
+
+    git = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    add_check("git repository", git.returncode == 0, (git.stdout or git.stderr).strip())
+
+    cfg = None
+    cfg_file = config_path(target)
+    add_check("config", cfg_file.is_file(), str(cfg_file))
+    if cfg_file.is_file():
+        try:
+            cfg = load_config(target)
+            add_check("config parse", True, f"endpoint={cfg.llm_base_url} fallback_model={cfg.model}")
+        except Exception as exc:
+            add_check("config parse", False, str(exc))
+
+    database = db_path(target)
+    add_check("blackboard database", database.is_file(), str(database))
+    if database.is_file():
+        try:
+            with db.connect(target) as conn:
+                db.init_db(conn)
+                objective_count = conn.execute("SELECT COUNT(*) FROM objectives").fetchone()[0]
+                task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+            add_check("database schema", True, f"objectives={objective_count} tasks={task_count}")
+        except Exception as exc:
+            add_check("database schema", False, str(exc))
+
+    if check_llm and cfg is not None:
+        url = f"{cfg.llm_base_url.rstrip('/')}/models"
+        try:
+            response = httpx.get(url, timeout=3.0)
+            add_check("LLM endpoint", response.status_code < 400, f"GET {url} -> HTTP {response.status_code}")
+        except Exception as exc:
+            add_check("LLM endpoint", False, f"GET {url} failed: {exc}")
+
+    console.print(table)
+    if failed:
+        raise typer.Exit(1)
+
+
+@app.command("context")
+def context_cmd(
+    files: List[str] = typer.Option([], "--files", "-f", help="Repo-relative file glob. Repeat for multiple globs."),
+    show: bool = typer.Option(False, "--show", help="Print the exact context that would be sent to an ant."),
+) -> None:
+    """Preview scoped file context and token-budget impact before spending LLM calls."""
+    repo = _repo()
+    cfg = load_config(repo)
+    try:
+        plan = build_context_plan(repo, files, cfg)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    table = Table(title="Context budget preview")
+    table.add_column("File")
+    table.add_column("Size", justify="right")
+    table.add_column("Included", justify="right")
+    table.add_column("Est. tokens", justify="right")
+    table.add_column("Status")
+    for entry in plan.entries:
+        status = entry.skipped_reason or ("truncated" if entry.truncated else "included")
+        style = "red" if entry.skipped_reason else ("yellow" if entry.truncated else "green")
+        table.add_row(
+            entry.path,
+            _format_bytes(entry.size_bytes),
+            _format_bytes(entry.included_bytes),
+            str(entry.estimated_tokens),
+            f"[{style}]{status}[/{style}]",
+        )
+    console.print(table)
+    console.print(
+        f"Included {plan.included_files} file(s), skipped {plan.skipped_files}; "
+        f"{_format_bytes(plan.total_included_bytes)} / {_format_bytes(cfg.max_context_bytes_total)} budget; "
+        f"~{plan.estimated_tokens} tokens."
+    )
+    if not files:
+        console.print("[yellow]No --files globs were provided; ants would receive no file contents.[/yellow]")
+    if show:
+        console.print(Panel(render_context(plan), title="Rendered context"))
 
 
 @app.command("ant")
@@ -306,6 +530,14 @@ def status_cmd() -> None:
     console.print(f"Repo: {repo}")
     console.print(f"LLM endpoint: {cfg.llm_base_url}")
     console.print(f"Fallback model: {cfg.model}")
+    console.print(f"LLM generation: max_tokens={cfg.llm_max_tokens} temperature={cfg.llm_temperature}")
+    console.print(
+        "Context budget: "
+        f"per_file={_format_bytes(cfg.max_context_bytes_per_file)} "
+        f"total={_format_bytes(cfg.max_context_bytes_total)} "
+        f"max_files={cfg.max_context_files} "
+        f"queen_reports={_format_bytes(cfg.queen_max_report_bytes)}"
+    )
 
     role_table = Table(title="Role model routing")
     role_table.add_column("Role")

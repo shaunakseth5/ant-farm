@@ -186,19 +186,93 @@ def run_wave(repo: Path, objective_id: int, roles: Iterable[str], target: str, f
     return sorted(results, key=lambda item: item["task_id"])
 
 
+def _truncate_text(value: Any, limit: int) -> Any:
+    if not isinstance(value, str) or len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + f"\n[truncated {len(value) - limit} chars]"
+
+
+def _compact_findings(findings: Any, limit: int = 8) -> List[Dict[str, Any]]:
+    if not isinstance(findings, list):
+        return []
+    compact: list[Dict[str, Any]] = []
+    for item in findings[:limit]:
+        if not isinstance(item, dict):
+            continue
+        compact.append({
+            "severity": item.get("severity"),
+            "file": item.get("file"),
+            "line": item.get("line"),
+            "message": _truncate_text(item.get("message", ""), 500),
+        })
+    if len(findings) > limit:
+        compact.append({"severity": "info", "file": None, "line": None, "message": f"{len(findings) - limit} additional findings omitted"})
+    return compact
+
+
+def _compact_report_for_queen(row: Any) -> Dict[str, Any]:
+    """Strip token-heavy fields before asking QueenAnt to synthesize reports."""
+    report = json.loads(row["json_text"])
+    patch = report.get("patch_diff")
+    patch_summary = None
+    if isinstance(patch, str) and patch.strip():
+        patch_summary = {
+            "present": True,
+            "bytes": len(patch.encode("utf-8", errors="replace")),
+            "lines": len(patch.splitlines()),
+            "preview": _truncate_text(patch, 1200),
+        }
+
+    compact = {
+        "task_id": row["task_id"],
+        "role": row["role"],
+        "summary": _truncate_text(report.get("summary", ""), 1200),
+        "findings": _compact_findings(report.get("findings")),
+        "commands_suggested": [_truncate_text(cmd, 300) for cmd in (report.get("commands_suggested") or [])[:8] if isinstance(cmd, str)],
+        "patch_diff": patch_summary,
+        "memory_candidates": [_truncate_text(mem, 500) for mem in (report.get("memory_candidates") or [])[:5] if isinstance(mem, str)],
+        "risks": [_truncate_text(risk, 500) for risk in (report.get("risks") or [])[:8] if isinstance(risk, str)],
+        "confidence": report.get("confidence"),
+    }
+    return compact
+
+
+def _bounded_reports_json(reports_payload: List[Dict[str, Any]], max_bytes: int) -> str:
+    """Serialize reports with a hard cap so Queen prompts do not balloon."""
+    if not reports_payload:
+        return "[]"
+    bounded: list[Dict[str, Any]] = []
+    for report in reports_payload:
+        candidate = [*bounded, report]
+        text = json.dumps(candidate, indent=2)
+        if len(text.encode("utf-8", errors="replace")) > max_bytes and bounded:
+            bounded.append({"omitted_reports": len(reports_payload) - len(bounded), "reason": f"queen_max_report_bytes={max_bytes} reached"})
+            break
+        if len(text.encode("utf-8", errors="replace")) > max_bytes:
+            bounded.append({"omitted_report": report.get("task_id"), "reason": f"single report exceeded queen_max_report_bytes={max_bytes}"})
+            break
+        bounded.append(report)
+    return json.dumps(bounded, indent=2)
+
+
 def run_queen(repo: Path, objective_id: int) -> Dict[str, Any]:
     cfg = load_config(repo)
     with db.connect(repo) as conn:
         objective = db.get_objective(conn, objective_id)
         reports = db.reports_for_objective(conn, objective_id)
-        reports_payload = [
-            {"task_id": row["task_id"], "role": row["role"], "report": json.loads(row["json_text"])} for row in reports
-        ]
+        accepted_memories = db.list_memory_candidates(conn, objective_id=objective_id, status="accepted", limit=20)
+        reports_payload = [_compact_report_for_queen(row) for row in reports]
+        if accepted_memories:
+            reports_payload.insert(0, {
+                "accepted_memory": [
+                    {"id": row["id"], "text": _truncate_text(row["text"], 500)} for row in accepted_memories
+                ]
+            })
         task_id = db.create_task(conn, objective_id, "queen", "synthesize worker reports", [])
         db.update_task_status(conn, task_id, "running")
 
     if reports_payload:
-        reports_json = json.dumps(reports_payload, indent=2)
+        reports_json = _bounded_reports_json(reports_payload, cfg.queen_max_report_bytes)
     else:
         reports_json = json.dumps([{"note": "No worker reports yet.", "repo_tree": simple_tree(repo)}], indent=2)
 
