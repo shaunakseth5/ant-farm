@@ -55,7 +55,12 @@ Ant Farm stores all operational state inside the target repository:
 
 The `.antfarm/.gitignore` file ignores all local state so blackboards, logs, and worktrees do not pollute `git status`.
 
-After initialization, Ant Farm resolves the nearest initialized parent repository, so commands can be run from subdirectories without setting `ANTFARM_REPO`.
+After initialization, Ant Farm resolves the nearest initialized parent repository, so commands can be run from subdirectories without setting `ANTFARM_REPO`. You can also target any repo explicitly from anywhere:
+
+```bash
+antfarm -C /path/to/repo status
+antfarm -C /path/to/repo run "Investigate flaky tests" --files "tests/**/*.py"
+```
 
 ### Narrow worker ants
 
@@ -281,12 +286,37 @@ antfarm config set model_by_role.queen your-model-alias
 
 ## Quick Start
 
+### Usable one-shot path
+
 ```bash
 # inside any git repository
 antfarm init --repo .
 antfarm doctor
 
-antfarm objective "Fix failing parser test"
+# One command creates an objective, previews context, runs workers,
+# asks QueenAnt to synthesize, then optionally runs PatchAnt.
+antfarm run "Fix failing parser test" \
+  --files "src/parser/**/*.py" \
+  --files "tests/test_parser.py" \
+  --verify "python -m pytest tests/test_parser.py -q" \
+  --patch
+```
+
+If PatchAnt produces a validated patch, Ant Farm prints the next `antfarm task` and `antfarm apply` commands. To apply and verify in one flow:
+
+```bash
+antfarm run "Fix failing parser test" \
+  --files "src/parser/**/*.py" \
+  --files "tests/test_parser.py" \
+  --patch \
+  --apply-branch antfarm-parser-fix \
+  --verify-worktree "python -m pytest tests/test_parser.py -q"
+```
+
+### Step-by-step path
+
+```bash
+antfarm new "Fix failing parser test"
 
 # Check what will be sent before spending tokens
 antfarm context --files "src/**/*.py" --files "tests/**/*.py"
@@ -307,13 +337,9 @@ antfarm ant 1 patch \
   --files "src/parser/**/*.py" \
   --files "tests/test_parser.py"
 
-# Inspect task and patch
+# Inspect, apply, and verify isolated patch
 antfarm task <PATCH_TASK_ID>
-
-# Apply only in an isolated git worktree
 antfarm apply <PATCH_TASK_ID> --branch antfarm-parser-fix
-
-# Verify inside the isolated worktree
 antfarm verify-worktree <PATCH_TASK_ID> --cmd "python -m pytest tests/test_parser.py -q"
 ```
 
@@ -421,13 +447,35 @@ antfarm doctor --no-llm
 antfarm doctor --repo /path/to/repo
 ```
 
-### `antfarm objective TITLE`
+### `antfarm objective TITLE` / `antfarm new TITLE`
 
-Create an objective row in the blackboard.
+Create an objective row in the blackboard. `new` is a friendly alias.
 
 ```bash
 antfarm objective "Fix flaky auth test"
+antfarm new "Fix flaky auth test"
 ```
+
+### `antfarm run GOAL --files GLOB...`
+
+Run the ergonomic default workflow: create an objective, preview context, run a worker wave, run Queen synthesis, and optionally patch/apply/verify.
+
+```bash
+antfarm run "Fix auth timeout bug" \
+  --files "src/auth/**/*.py" \
+  --files "tests/test_auth.py" \
+  --ants debug,trace,risk \
+  --verify "python -m pytest tests/test_auth.py -q"
+
+antfarm run "Fix auth timeout bug" \
+  --files "src/auth/**/*.py" \
+  --files "tests/test_auth.py" \
+  --patch \
+  --apply-branch auth-timeout-fix \
+  --verify-worktree "python -m pytest tests/test_auth.py -q"
+```
+
+`run` refuses to execute with no `--files` unless `--no-files-ok` is passed. This is intentional: unscoped agent runs are usually token-wasteful and low quality.
 
 ### `antfarm context --files GLOB [--show]`
 

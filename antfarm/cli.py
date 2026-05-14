@@ -20,16 +20,17 @@ from .repo import build_context_plan, render_context
 from .sandbox import apply_task_patch
 from .verifier import run_verifier, run_verifier_in_dir
 
-app = typer.Typer(help="Ant Farm: local repo-scoped multi-agent coding system")
-config_app = typer.Typer(help="Inspect and edit repo-local Ant Farm configuration")
-memory_app = typer.Typer(help="Review and promote worker memory candidates")
+app = typer.Typer(help="Ant Farm: local repo-scoped multi-agent coding system", no_args_is_help=True)
+config_app = typer.Typer(help="Inspect and edit repo-local Ant Farm configuration", no_args_is_help=True)
+memory_app = typer.Typer(help="Review and promote worker memory candidates", no_args_is_help=True)
 app.add_typer(config_app, name="config")
 app.add_typer(memory_app, name="memory")
 console = Console()
+_repo_override: Path | None = None
 
 
 def _repo() -> Path:
-    repo = resolve_repo()
+    repo = resolve_repo(_repo_override)
     try:
         assert_not_inside_antfarm_worktree(repo)
         ensure_repo_initialized(repo)
@@ -73,17 +74,70 @@ def _parse_config_value(value: str) -> Any:
         return value
 
 
+def _create_objective(repo: Path, title: str) -> int:
+    with db.connect(repo) as conn:
+        db.init_db(conn)
+        return db.create_objective(conn, title)
+
+
+def _print_context_plan(repo: Path, files: List[str], show: bool = False) -> None:
+    cfg = load_config(repo)
+    plan = build_context_plan(repo, files, cfg)
+    table = Table(title="Context budget preview")
+    table.add_column("File")
+    table.add_column("Size", justify="right")
+    table.add_column("Included", justify="right")
+    table.add_column("Est. tokens", justify="right")
+    table.add_column("Status")
+    for entry in plan.entries:
+        status = entry.skipped_reason or ("truncated" if entry.truncated else "included")
+        style = "red" if entry.skipped_reason else ("yellow" if entry.truncated else "green")
+        table.add_row(
+            entry.path,
+            _format_bytes(entry.size_bytes),
+            _format_bytes(entry.included_bytes),
+            str(entry.estimated_tokens),
+            f"[{style}]{status}[/{style}]",
+        )
+    console.print(table)
+    console.print(
+        f"Included {plan.included_files} file(s), skipped {plan.skipped_files}; "
+        f"{_format_bytes(plan.total_included_bytes)} / {_format_bytes(cfg.max_context_bytes_total)} budget; "
+        f"~{plan.estimated_tokens} tokens."
+    )
+    if show:
+        console.print(Panel(render_context(plan), title="Rendered context"))
+
+
+def _print_wave_table(results: List[dict[str, Any]], title: str = "Worker results") -> None:
+    table = Table(title=title)
+    table.add_column("Task")
+    table.add_column("Role")
+    table.add_column("Status")
+    table.add_column("Summary")
+    for result in results:
+        report = result.get("report") or {}
+        table.add_row(str(result["task_id"]), report.get("role", ""), result["status"], report.get("summary", ""))
+    console.print(table)
+
+
 @app.callback()
-def callback(version: bool = typer.Option(False, "--version", help="Show version and exit.")) -> None:
+def callback(
+    version: bool = typer.Option(False, "--version", help="Show version and exit."),
+    repo: Optional[Path] = typer.Option(None, "--repo", "-C", help="Repository to operate on. Defaults to nearest initialized parent."),
+) -> None:
+    """Ant Farm: local multi-agent coding, with explicit context and patch safety."""
+    global _repo_override
+    _repo_override = repo
     if version:
         console.print(f"antfarm {__version__}")
         raise typer.Exit()
 
 
 @app.command("init")
-def init_cmd(repo: Path = typer.Option(..., "--repo", help="Target repository path.")) -> None:
+def init_cmd(repo: Optional[Path] = typer.Option(None, "--repo", help="Target repository path. Defaults to --repo/-C or current directory.")) -> None:
     """Initialize repo-local .antfarm state."""
-    target = resolve_repo(repo)
+    target = resolve_repo(repo or _repo_override or Path.cwd())
     target.mkdir(parents=True, exist_ok=True)
     cfg = AntFarmConfig()
     save_config(target, cfg)
@@ -97,10 +151,115 @@ def init_cmd(repo: Path = typer.Option(..., "--repo", help="Target repository pa
 def objective_cmd(title: str = typer.Argument(..., help="Objective title.")) -> None:
     """Create an objective."""
     repo = _repo()
-    with db.connect(repo) as conn:
-        db.init_db(conn)
-        objective_id = db.create_objective(conn, title)
+    objective_id = _create_objective(repo, title)
     console.print(f"[green]Objective {objective_id}[/green]: {title}")
+
+
+@app.command("new")
+def new_cmd(title: str = typer.Argument(..., help="Objective title.")) -> None:
+    """Create an objective (friendly alias for `objective`)."""
+    objective_cmd(title)
+
+
+@app.command("run")
+def run_cmd(
+    goal: str = typer.Argument(..., help="Plain-English goal to investigate."),
+    files: List[str] = typer.Option([], "--files", "-f", help="Repo-relative file glob. Repeat for multiple globs."),
+    ants: str = typer.Option("debug,trace,risk", "--ants", help="Comma-separated roles for the investigation wave."),
+    max_workers: int = typer.Option(3, "--max-workers", min=1, help="Maximum concurrent ants."),
+    verify: Optional[str] = typer.Option(None, "--verify", help="Optional verifier command to run after the wave."),
+    patch: bool = typer.Option(False, "--patch", help="Run PatchAnt after Queen using the same file scope."),
+    patch_target: Optional[str] = typer.Option(None, "--patch-target", help="PatchAnt target. Implies --patch."),
+    apply_branch: Optional[str] = typer.Option(None, "--apply-branch", help="Apply PatchAnt output to an isolated worktree branch."),
+    verify_worktree: Optional[str] = typer.Option(None, "--verify-worktree", help="Verifier command to run inside the applied worktree."),
+    no_files_ok: bool = typer.Option(False, "--no-files-ok", help="Allow a run with no file context."),
+) -> None:
+    """Usable one-shot flow: objective -> context preview -> wave -> Queen -> optional patch/apply/verify."""
+    repo = _repo()
+    roles = [role.strip() for role in ants.split(",") if role.strip()]
+    if not roles:
+        console.print("[red]No ant roles provided.[/red]")
+        raise typer.Exit(1)
+    if not files and not no_files_ok:
+        console.print(Panel(
+            "[bold red]No --files globs provided.[/bold red]\n\n"
+            "Ant Farm is intentionally scoped to avoid token waste. Add one or more repo-relative globs, for example:\n\n"
+            "  antfarm run \"Fix parser bug\" --files 'src/**/*.py' --files 'tests/**/*.py'\n\n"
+            "If you really want no file context, pass --no-files-ok.",
+            title="Refusing unscoped run",
+        ))
+        raise typer.Exit(1)
+
+    try:
+        if files:
+            _print_context_plan(repo, files)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+
+    objective_id = _create_objective(repo, goal)
+    console.print(Panel(
+        f"Objective [bold]{objective_id}[/bold] created\n"
+        f"Goal: {goal}\n"
+        f"Roles: {', '.join(roles)}\n"
+        f"Files: {', '.join(files) if files else '(none)'}",
+        title="Ant Farm run",
+    ))
+
+    with console.status("[bold yellow]Running worker wave...[/bold yellow]", spinner="dots"):
+        wave_results = run_wave(repo, objective_id, roles, goal, files, max_workers)
+    _print_wave_table(wave_results, title="Worker wave")
+
+    if verify:
+        with console.status("[bold cyan]Running verifier...[/bold cyan]", spinner="bouncingBar"):
+            verify_result = run_verifier(repo, objective_id, verify)
+        color = "green" if verify_result["exit_code"] == 0 else "red"
+        console.print(f"[{color}]Verifier {verify_result['id']} exit={verify_result['exit_code']} timed_out={verify_result['timed_out']} duration={verify_result['duration_seconds']:.2f}s[/{color}]")
+
+    with console.status("[bold magenta]QueenAnt synthesizing...[/bold magenta]", spinner="moon"):
+        queen_result = run_queen(repo, objective_id)
+    console.print(f"[green]Queen task {queen_result['task_id']}[/green] status={queen_result['status']}")
+    _print_json(queen_result["decision"])
+
+    should_patch = patch or patch_target is not None or apply_branch is not None or verify_worktree is not None
+    patch_task_id = None
+    applied = None
+    if should_patch:
+        target = patch_target or goal
+        with console.status("[bold yellow]PatchAnt generating gated diff...[/bold yellow]", spinner="line"):
+            patch_result = run_ant(repo, objective_id, "patch", target, files)
+        patch_task_id = patch_result["task_id"]
+        console.print(f"[green]PatchAnt task {patch_task_id}[/green] status={patch_result['status']}")
+        _print_json(patch_result["report"])
+        with db.connect(repo) as conn:
+            patch_candidate = db.patch_for_task(conn, patch_task_id)
+        if patch_candidate is None:
+            console.print(f"[yellow]PatchAnt did not produce a validated patch. Inspect: antfarm task {patch_task_id}[/yellow]")
+            return
+        if apply_branch:
+            applied = apply_task_patch(repo, patch_task_id, apply_branch)
+            console.print(f"[green]Patch applied in isolated worktree[/green]: {applied['worktree']}")
+        else:
+            console.print(f"Next: antfarm task {patch_task_id}")
+            console.print(f"Then: antfarm apply {patch_task_id} --branch <branch-name>")
+
+    if verify_worktree:
+        if patch_task_id is None or applied is None:
+            console.print("[red]--verify-worktree requires --apply-branch and a validated patch.[/red]")
+            raise typer.Exit(1)
+        worktree = Path(applied["worktree"]).resolve()
+        with console.status("[bold cyan]Verifying isolated worktree...[/bold cyan]", spinner="aesthetic"):
+            wt_result = run_verifier_in_dir(repo, objective_id, verify_worktree, worktree)
+        color = "green" if wt_result["exit_code"] == 0 else "red"
+        console.print(f"[{color}]Worktree verifier {wt_result['id']} exit={wt_result['exit_code']} timed_out={wt_result['timed_out']} duration={wt_result['duration_seconds']:.2f}s[/{color}]")
+
+    console.print(Panel(
+        f"Objective: {objective_id}\n"
+        f"Status: antfarm status\n"
+        f"Queen: antfarm task {queen_result['task_id']}"
+        + (f"\nPatch: antfarm task {patch_task_id}" if patch_task_id else ""),
+        title="Done",
+    ))
 
 
 @config_app.command("show")

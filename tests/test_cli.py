@@ -44,11 +44,30 @@ def test_context_command_previews_budget(tmp_path: Path, monkeypatch) -> None:  
     monkeypatch.chdir(repo)
 
     result = runner.invoke(app, ["context", "--files", "*.py"])
+    global_result = runner.invoke(app, ["-C", str(repo), "context", "--files", "*.py"])
 
     assert result.exit_code == 0, result.output
+    assert global_result.exit_code == 0, global_result.output
     assert "Context budget preview" in result.output
     assert "main.py" in result.output
     assert "~" in result.output and "tokens" in result.output
+
+
+def test_run_refuses_unscoped_goal_before_llm_calls(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    runner = CliRunner()
+    init_result = runner.invoke(app, ["init", "--repo", str(repo)])
+    assert init_result.exit_code == 0, init_result.output
+    monkeypatch.chdir(repo)
+
+    result = runner.invoke(app, ["run", "Fix the CLI"])
+
+    assert result.exit_code == 1
+    assert "No --files globs provided" in result.output
+    with db.connect(repo) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM objectives").fetchone()[0] == 0
 
 
 def test_config_set_validates_and_persists_values(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
